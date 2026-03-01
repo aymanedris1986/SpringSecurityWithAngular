@@ -18,7 +18,16 @@
   </component>
   <component name="JavacSettings">
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="authorization-server" options="-parameters" />
+      <module name="authorization-server.main" options="-parameters" />
+      <module name="authorization-server.test" options="-parameters" />
       <module name="client-server-oauth2" options="-parameters" />
+      <module name="gateway-spring-cloud" options="-parameters" />
+      <module name="gateway-spring-cloud.main" options="-parameters" />
+      <module name="gateway-spring-cloud.test" options="-parameters" />
+      <module name="resource-server-oauth2" options="-parameters" />
+      <module name="resource-server-oauth2.main" options="-parameters" />
+      <module name="resource-server-oauth2.test" options="-parameters" />
       <module name="spring-angular-frontend-server" options="-parameters" />
     </option>
   </component>
