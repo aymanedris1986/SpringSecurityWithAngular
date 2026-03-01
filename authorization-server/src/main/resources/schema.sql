@@ -104,3 +104,30 @@ CREATE TABLE IF NOT EXISTS oauth2_authorization_consent (
     authorities          varchar(1000) NOT NULL,
     PRIMARY KEY (registered_client_id, principal_name)
 );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TABLE 3 — users
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Required by Spring Security's JdbcUserDetailsManager.
+-- Stores user credentials and account status flags.
+-- The default queries used by JdbcUserDetailsManager expect exactly this
+-- table name and column names.
+CREATE TABLE IF NOT EXISTS users (
+    username varchar(50)  NOT NULL PRIMARY KEY,
+    password varchar(500) NOT NULL,
+    enabled  boolean      NOT NULL DEFAULT true
+);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TABLE 4 — authorities
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Required by Spring Security's JdbcUserDetailsManager.
+-- Stores the granted authorities (roles/permissions) for each user.
+-- The foreign key ensures referential integrity with the users table.
+-- The unique index prevents duplicate authority assignments.
+CREATE TABLE IF NOT EXISTS authorities (
+    username  varchar(50)  NOT NULL,
+    authority varchar(50)  NOT NULL,
+    CONSTRAINT fk_authorities_users FOREIGN KEY (username) REFERENCES users(username)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_auth_username ON authorities (username, authority);

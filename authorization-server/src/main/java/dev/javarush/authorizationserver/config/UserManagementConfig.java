@@ -1,16 +1,16 @@
 package dev.javarush.authorizationserver.config;
 
+import javax.sql.DataSource;
+
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.core.userdetails.User;
-import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.NoOpPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.provisioning.JdbcUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 
 /**
@@ -355,13 +355,46 @@ public class UserManagementConfig {
      *     - Social Login: NOT needed — authentication is delegated externally.
      */
     @Bean
-    public UserDetailsService userDetailsService() {
-        UserDetails user = User.withUsername("java-rush")
-                .password("pass")
-                .authorities("read")
-                .build();
+    public UserDetailsService userDetailsService(DataSource dataSource) {
+        // ── JdbcUserDetailsManager ──────────────────────────────────────────────
+        // JdbcUserDetailsManager is Spring Security's JDBC-backed implementation
+        // of both UserDetailsService (read) and UserDetailsManager (CRUD).
+        //
+        // HOW IT WORKS:
+        //   It delegates all user-related operations to SQL queries against the
+        //   standard 'users' and 'authorities' tables. The DataSource is injected
+        //   automatically from the Spring Boot auto-configuration (configured in
+        //   application.yaml with the PostgreSQL connection details).
+        //
+        // DEFAULT QUERIES (used internally by JdbcUserDetailsManager):
+        //   • loadUserByUsername: SELECT username, password, enabled
+        //                        FROM users WHERE username = ?
+        //   • findAuthorities:   SELECT username, authority
+        //                        FROM authorities WHERE username = ?
+        //   • createUser:        INSERT INTO users (username, password, enabled)
+        //                        VALUES (?, ?, ?)
+        //   • createAuthority:   INSERT INTO authorities (username, authority)
+        //                        VALUES (?, ?)
+        //
+        // CUSTOM QUERIES (optional — override if your tables have different names):
+        //   manager.setUsersByUsernameQuery(
+        //       "SELECT username, password, enabled FROM my_users WHERE username = ?");
+        //   manager.setAuthoritiesByUsernameQuery(
+        //       "SELECT username, authority FROM my_authorities WHERE username = ?");
+        //
+        // KEY DIFFERENCE FROM InMemoryUserDetailsManager:
+        //   InMemory stores users in a HashMap — lost on restart, no persistence.
+        //   JDBC stores users in the database — survives restarts, shared across
+        //   instances, auditable, and manageable via SQL.
+        // ────────────────────────────────────────────────────────────────────────
+        //
+        // ⚠️ IMPORTANT — Do NOT call manager.userExists() or manager.createUser()
+        //   here! This bean is constructed BEFORE Spring Boot's schema.sql runs,
+        //   so the 'users' table does not exist yet during bean creation.
+        //   Seed demo users via data.sql instead (see src/main/resources/data.sql).
+        // ────────────────────────────────────────────────────────────────────────
 
-        return new InMemoryUserDetailsManager(user);
+        return new JdbcUserDetailsManager(dataSource);
     }
 
     /**
