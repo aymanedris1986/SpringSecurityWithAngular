@@ -157,6 +157,202 @@ public class UserManagementConfig {
      *   Username:    java-rush
      *   Password:    pass
      *   Authorities: read (a simple granted authority)
+     *
+     * ── PASSWORDLESS LOGIN ──────────────────────────────────────────────────────
+     *
+     *   Passwordless authentication removes the password entirely. The user proves
+     *   their identity through an alternative factor (something they HAVE or ARE)
+     *   instead of something they KNOW. Below are the three main strategies and
+     *   how each integrates with Spring Security's architecture.
+     *
+     * ─── APPROACH 1: OTP / Magic Link (Email or SMS) ────────────────────────────
+     *
+     *   CONCEPT:
+     *     The user provides their email or phone number. The server generates a
+     *     one-time password (OTP) or a signed magic link and delivers it out-of-band
+     *     (email / SMS). The user then submits the OTP or clicks the magic link to
+     *     complete authentication.
+     *
+     *   HOW IT WORKS WITH SPRING SECURITY:
+     *
+     *     1. Custom Authentication Filter (extends OncePerRequestFilter or
+     *        AbstractAuthenticationProcessingFilter):
+     *        - Intercepts POST /login/otp-request → generates & sends OTP
+     *        - Intercepts POST /login/otp-verify  → validates OTP & authenticates
+     *
+     *     2. Custom AuthenticationToken:
+     *
+     *          public class OtpAuthenticationToken
+     *                  extends AbstractAuthenticationToken {
+     *
+     *              private final String identifier;  // email or phone
+     *              private final String otp;
+     *
+     *              // Pre-authentication constructor (unauthenticated)
+     *              public OtpAuthenticationToken(String identifier, String otp) {
+     *                  super(Collections.emptyList());
+     *                  this.identifier = identifier;
+     *                  this.otp = otp;
+     *                  setAuthenticated(false);
+     *              }
+     *
+     *              // Post-authentication constructor (authenticated)
+     *              public OtpAuthenticationToken(String identifier,
+     *                      Collection<? extends GrantedAuthority> authorities) {
+     *                  super(authorities);
+     *                  this.identifier = identifier;
+     *                  this.otp = null;
+     *                  setAuthenticated(true);
+     *              }
+     *          }
+     *
+     *     3. Custom AuthenticationProvider:
+     *
+     *          @Component
+     *          public class OtpAuthenticationProvider
+     *                  implements AuthenticationProvider {
+     *
+     *              private final OtpService otpService;
+     *              private final UserDetailsService userDetailsService;
+     *
+     *              @Override
+     *              public Authentication authenticate(Authentication auth) {
+     *                  OtpAuthenticationToken token = (OtpAuthenticationToken) auth;
+     *                  if (!otpService.verify(token.getIdentifier(), token.getOtp())) {
+     *                      throw new BadCredentialsException("Invalid OTP");
+     *                  }
+     *                  UserDetails user = userDetailsService
+     *                          .loadUserByUsername(token.getIdentifier());
+     *                  return new OtpAuthenticationToken(
+     *                          user.getUsername(), user.getAuthorities());
+     *              }
+     *
+     *              @Override
+     *              public boolean supports(Class<?> authType) {
+     *                  return OtpAuthenticationToken.class.isAssignableFrom(authType);
+     *              }
+     *          }
+     *
+     *     4. OTP Storage — the OtpService needs a short-lived store:
+     *        - Redis (TTL-based expiry, recommended for distributed systems)
+     *        - Database table (e.g., otp_challenges with columns:
+     *            id, identifier, otp_hash, expires_at, verified)
+     *        - In-memory cache (ConcurrentHashMap + ScheduledExecutor, dev only)
+     *
+     *     5. Wire into the filter chain (in this config class):
+     *
+     *          http
+     *              .addFilterBefore(otpFilter,
+     *                      UsernamePasswordAuthenticationFilter.class)
+     *              .authenticationProvider(otpAuthenticationProvider);
+     *
+     *   MAGIC LINK VARIANT:
+     *     Instead of a numeric OTP, generate a signed JWT or opaque token embedded
+     *     in a URL (e.g., /login/verify?token=xyz). The filter intercepts GET
+     *     /login/verify, validates the token, and creates an authenticated session.
+     *     Use short expiry (5–10 min) and single-use semantics (mark as consumed).
+     *
+     * ─── APPROACH 2: WebAuthn / Passkeys (FIDO2) ───────────────────────────────
+     *
+     *   CONCEPT:
+     *     Uses public-key cryptography tied to the user's device or platform
+     *     authenticator (fingerprint, face, security key). No shared secret is ever
+     *     transmitted — the private key never leaves the user's device.
+     *
+     *   SPRING SECURITY 6.4+ SUPPORT:
+     *     Spring Security 6.4 introduced first-class WebAuthn/Passkey support:
+     *
+     *          http
+     *              .webAuthn(webAuthn -> webAuthn
+     *                  .rpName("My Application")
+     *                  .rpId("example.com")
+     *                  .allowedOrigins("https://example.com")
+     *              );
+     *
+     *     This auto-configures:
+     *       • POST /webauthn/register/options  — begin registration ceremony
+     *       • POST /webauthn/register           — complete registration
+     *       • Registration of WebAuthnAuthenticationProvider
+     *       • A default PublicKeyCredentialUserEntityRepository
+     *
+     *   FOR OLDER SPRING SECURITY VERSIONS:
+     *     Use the java-webauthn-server library (by Yubico) and build custom:
+     *       • RegistrationController — handles attestation ceremony
+     *       • AuthenticationFilter   — handles assertion ceremony
+     *       • CredentialRepository   — stores public keys per user
+     *
+     *   HOW IT TIES INTO OAUTH 2.0:
+     *     The WebAuthn flow authenticates the user and establishes a session. Once
+     *     the session exists, the OAuth 2.0 authorization endpoint (/oauth2/authorize)
+     *     sees the user as authenticated and proceeds with the code/token grant.
+     *     WebAuthn replaces the formLogin() — the authorization flow is unaffected.
+     *
+     * ─── APPROACH 3: OAuth 2.0 Social / Federated Login ────────────────────────
+     *
+     *   CONCEPT:
+     *     Delegate authentication to an external identity provider (Google, GitHub,
+     *     Apple, etc.). The user authenticates with the external IdP and your server
+     *     receives a verified identity (ID token / user-info). No password is stored
+     *     locally at all.
+     *
+     *   SPRING SECURITY CONFIGURATION:
+     *
+     *          http
+     *              .oauth2Login(oauth2 -> oauth2
+     *                  .userInfoEndpoint(info -> info
+     *                      .userService(customOAuth2UserService)
+     *                  )
+     *              );
+     *
+     *     Combined with application.yml:
+     *
+     *          spring.security.oauth2.client.registration.google:
+     *            client-id: ${GOOGLE_CLIENT_ID}
+     *            client-secret: ${GOOGLE_CLIENT_SECRET}
+     *            scope: openid, profile, email
+     *
+     *   USER PROVISIONING:
+     *     On first login, create (or link) a local user account from the ID token
+     *     claims. The customOAuth2UserService maps the external identity to your
+     *     internal UserDetails, effectively making the UserDetailsService bean
+     *     unnecessary for social-only users.
+     *
+     * ─── INTEGRATING WITH THIS AUTHORIZATION SERVER ─────────────────────────────
+     *
+     *   KEY INSIGHT: Passwordless flows only change HOW the user authenticates in
+     *   STEP 2–3 of the OAuth 2.0 Authorization Code flow. The rest of the flow
+     *   (authorization code issuance, token exchange, client authentication)
+     *   remains completely unchanged.
+     *
+     *   FILTER CHAIN IMPACT:
+     *     Replace or augment .formLogin() in userManagementSecurityFilterChain():
+     *
+     *       // Passwordless with OTP — keep formLogin for fallback, add OTP filter
+     *       http
+     *           .addFilterBefore(otpFilter, UsernamePasswordAuthenticationFilter.class)
+     *           .formLogin(Customizer.withDefaults());  // optional fallback
+     *
+     *       // Passwordless with Passkeys — replace formLogin entirely
+     *       http
+     *           .webAuthn(webAuthn -> webAuthn.rpName("My App").rpId("example.com"))
+     *           .formLogin(Customizer.withDefaults());  // fallback for non-WebAuthn browsers
+     *
+     *       // Passwordless with Social Login
+     *       http
+     *           .oauth2Login(Customizer.withDefaults());  // replaces formLogin
+     *
+     *   UserDetailsService IMPACT:
+     *     - OTP: Still needed — loadUserByUsername(email/phone) fetches the user.
+     *     - Passkeys: Still needed — WebAuthn maps credentials to a user identity.
+     *     - Social Login: May be replaced by a custom OAuth2UserService, but a
+     *       UserDetailsService is still useful if you need to enrich the user with
+     *       local authorities or support mixed login methods.
+     *
+     *   PasswordEncoder IMPACT:
+     *     - OTP: NOT needed for user auth (OTP is verified differently), but keep
+     *       it if the same server also handles OAuth2 client_secret verification.
+     *     - Passkeys: NOT needed — no shared secret exists.
+     *     - Social Login: NOT needed — authentication is delegated externally.
      */
     @Bean
     public UserDetailsService userDetailsService() {
