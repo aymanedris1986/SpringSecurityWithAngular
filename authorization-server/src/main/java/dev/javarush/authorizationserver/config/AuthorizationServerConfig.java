@@ -1,20 +1,38 @@
 package dev.javarush.authorizationserver.config;
 
+import com.nimbusds.jose.jwk.source.JWKSource;
+import com.nimbusds.jose.proc.SecurityContext;
+import dev.javarush.authorizationserver.grant.password.ResourceOwnerPasswordAuthenticationConverter;
+import dev.javarush.authorizationserver.grant.password.ResourceOwnerPasswordAuthenticationProvider;
+import dev.javarush.authorizationserver.grant.password.ResourceOwnerPasswordAuthenticationToken;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
+import org.springframework.security.oauth2.core.OAuth2Token;
 import org.springframework.security.oauth2.core.oidc.OidcScopes;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.oauth2.server.authorization.InMemoryOAuth2AuthorizationConsentService;
+import org.springframework.security.oauth2.server.authorization.InMemoryOAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationConsentService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.client.InMemoryRegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
 import org.springframework.security.oauth2.server.authorization.config.annotation.web.configurers.OAuth2AuthorizationServerConfigurer;
 import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
+import org.springframework.security.oauth2.server.authorization.token.DelegatingOAuth2TokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.JwtGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2AccessTokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2RefreshTokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenGenerator;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
 import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
@@ -86,7 +104,11 @@ public class AuthorizationServerConfig {
     @Bean
     @Order(1)
     public SecurityFilterChain authorizationServerSecurityFilterChain(
-            HttpSecurity http
+            HttpSecurity http,
+            UserDetailsService userDetailsService,
+            PasswordEncoder passwordEncoder,
+            OAuth2AuthorizationService authorizationService,
+            OAuth2TokenGenerator<? extends OAuth2Token> tokenGenerator
     ) throws Exception {
 
         /*
@@ -105,25 +127,30 @@ public class AuthorizationServerConfig {
         OAuth2AuthorizationServerConfiguration.applyDefaultSecurity(http);
 
         /*
-         * STEP 2 — Enable OpenID Connect (OIDC) 1.0 Support
+         * STEP 2 — Enable OIDC + Register the custom "password" grant type
          *
-         * OIDC is an identity layer ON TOP of OAuth 2.0. While OAuth 2.0 only deals
-         * with AUTHORIZATION (access tokens), OIDC adds AUTHENTICATION by introducing:
-         *   • ID Tokens (JWT containing user identity claims like sub, name, email)
-         *   • UserInfo Endpoint (/userinfo — returns claims about the authenticated user)
-         *   • Discovery Endpoint (/.well-known/openid-configuration)
+         * The tokenEndpoint customization registers:
+         *   • ResourceOwnerPasswordAuthenticationConverter — parses grant_type=password
+         *     requests from the /oauth2/token endpoint
+         *   • ResourceOwnerPasswordAuthenticationProvider — validates user credentials
+         *     and generates tokens through the SAME token pipeline as other grants
          *
-         * By calling .oidc(Customizer.withDefaults()), we enable:
-         *   • The `openid` scope to be recognized
-         *   • ID Token generation alongside access tokens
-         *   • The UserInfo endpoint
-         *   • The OIDC Provider Configuration (discovery) endpoint
-         *
-         * Without this line, the server would only issue opaque access tokens and
-         * would NOT provide identity information about the user.
+         * This means the client calls the SAME /oauth2/token endpoint with:
+         *   grant_type=password&username=<user>&password=<pass>
+         * and gets back the standard OAuth 2.0 token response.
          */
         http.getConfigurer(OAuth2AuthorizationServerConfigurer.class)
-                        .oidc(Customizer.withDefaults());
+                .tokenEndpoint(tokenEndpoint -> tokenEndpoint
+                        .accessTokenRequestConverter(
+                                new ResourceOwnerPasswordAuthenticationConverter())
+                        .authenticationProvider(
+                                new ResourceOwnerPasswordAuthenticationProvider(
+                                        userDetailsService,
+                                        passwordEncoder,
+                                        authorizationService,
+                                        tokenGenerator))
+                )
+                .oidc(Customizer.withDefaults());
 
         /*
          * STEP 3 — Configure the Authentication Entry Point (redirect to login)
@@ -226,6 +253,7 @@ public class AuthorizationServerConfig {
                 .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
                 .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
                 .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
+                .authorizationGrantType(ResourceOwnerPasswordAuthenticationToken.PASSWORD)
 
                 /*
                  * CLIENT AUTHENTICATION METHOD — How the client proves its identity
@@ -308,5 +336,58 @@ public class AuthorizationServerConfig {
     @Bean
     public AuthorizationServerSettings authorizationServerSettings() {
         return AuthorizationServerSettings.builder().build();
+    }
+
+    /**
+     * ─────────────────────────────────────────────────────────────────────────────────
+     * BEAN 4 — OAuth2 Token Generator
+     * ─────────────────────────────────────────────────────────────────────────────────
+     *
+     * Explicitly defines the token generator as a Spring bean so it can be:
+     *   1. Used by the framework for authorization_code and client_credentials grants
+     *   2. Injected into our custom ResourceOwnerPasswordAuthenticationProvider
+     *
+     * The generator delegates to three sub-generators in order:
+     *   • JwtGenerator           — produces JWT access tokens (signed with the server's RSA key)
+     *   • OAuth2AccessTokenGenerator — fallback for opaque access tokens
+     *   • OAuth2RefreshTokenGenerator — produces opaque refresh tokens
+     */
+    @Bean
+    public OAuth2TokenGenerator<? extends OAuth2Token> tokenGenerator(
+            JWKSource<SecurityContext> jwkSource) {
+        JwtGenerator jwtGenerator = new JwtGenerator(new NimbusJwtEncoder(jwkSource));
+        OAuth2AccessTokenGenerator accessTokenGenerator = new OAuth2AccessTokenGenerator();
+        OAuth2RefreshTokenGenerator refreshTokenGenerator = new OAuth2RefreshTokenGenerator();
+        return new DelegatingOAuth2TokenGenerator(
+                jwtGenerator, accessTokenGenerator, refreshTokenGenerator);
+    }
+
+    /**
+     * ─────────────────────────────────────────────────────────────────────────────────
+     * BEAN 5 — OAuth2 Authorization Service
+     * ─────────────────────────────────────────────────────────────────────────────────
+     *
+     * Stores OAuth2 authorizations (tokens, codes, etc.) in memory.
+     * Defined explicitly because the filter chain depends on it at construction time.
+     *
+     * IN PRODUCTION: Replace with JdbcOAuth2AuthorizationService backed by a database.
+     */
+    @Bean
+    public OAuth2AuthorizationService authorizationService() {
+        return new InMemoryOAuth2AuthorizationService();
+    }
+
+    /**
+     * ─────────────────────────────────────────────────────────────────────────────────
+     * BEAN 6 — OAuth2 Authorization Consent Service
+     * ─────────────────────────────────────────────────────────────────────────────────
+     *
+     * Stores user consent decisions (which scopes the user approved) in memory.
+     *
+     * IN PRODUCTION: Replace with JdbcOAuth2AuthorizationConsentService.
+     */
+    @Bean
+    public OAuth2AuthorizationConsentService authorizationConsentService() {
+        return new InMemoryOAuth2AuthorizationConsentService();
     }
 }
