@@ -457,22 +457,209 @@ public class AuthorizationServerConfig {
                 .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
 
                 /*
-                 * SCOPES — Define WHAT the client is allowed to access.
+                 * ─────────────────────────────────────────────────────────────
+                 * SCOPES — Define WHAT the client is allowed to access
+                 * ─────────────────────────────────────────────────────────────
                  *
-                 * Scopes limit the access granted by an access token. The client
-                 * requests scopes during authorization; the user can consent to
-                 * all or a subset of them.
+                 * WHAT IS A SCOPE?
+                 *   A scope is a permission label that limits what an access token
+                 *   can do. Think of scopes as "permission slips":
+                 *     • The CLIENT requests a set of scopes when redirecting the
+                 *       user to /oauth2/authorize
+                 *     • The USER sees these scopes on the CONSENT SCREEN and can
+                 *       approve or deny each one
+                 *     • The AUTHORIZATION SERVER issues an access token that
+                 *       contains ONLY the approved scopes
+                 *     • The RESOURCE SERVER checks the token's scopes before
+                 *       serving data (e.g., "does this token have the 'email'
+                 *       scope? If not, deny access to the email endpoint")
                  *
-                 * • OPENID — Required for OIDC. Signals that this is an authentication
-                 *   request. When present, the server issues an ID Token in addition
-                 *   to the access token.
+                 * In short: Scopes = what the CLIENT is allowed to ask for,
+                 * filtered by what the USER agrees to share.
                  *
-                 * • PROFILE — An OIDC standard scope that grants access to the user's
-                 *   profile claims (name, family_name, picture, etc.) via the
-                 *   UserInfo endpoint or as claims in the ID Token.
+                 * ── THE 5 STANDARD OIDC SCOPES (OpenID Connect Core 1.0 §5.4) ──
+                 *
+                 * ┌────────────────────────────────────────────────────────────────────────┐
+                 * │  1. openid  (REQUIRED for OIDC)                                       │
+                 * ├────────────────────────────────────────────────────────────────────────┤
+                 * │                                                                        │
+                 * │  PURPOSE: Signals that this is an AUTHENTICATION request, not just     │
+                 * │           an authorization request. It tells the Authorization Server  │
+                 * │           "I want to know WHO the user is, not just get access."       │
+                 * │                                                                        │
+                 * │  WHAT IT UNLOCKS:                                                      │
+                 * │    • The server issues an ID TOKEN alongside the access token          │
+                 * │    • The ID Token contains the "sub" (subject) claim — the unique      │
+                 * │      identifier of the authenticated user                              │
+                 * │    • Enables the /userinfo endpoint for retrieving user claims          │
+                 * │                                                                        │
+                 * │  WITHOUT IT:                                                           │
+                 * │    No ID Token is issued. The flow is plain OAuth 2.0 — the client     │
+                 * │    gets an access token but has NO information about who the user is.   │
+                 * │                                                                        │
+                 * │  CLAIMS ADDED TO ID TOKEN:                                             │
+                 * │    • sub       — unique user identifier (always present)               │
+                 * │    • iss       — issuer URL                                            │
+                 * │    • aud       — client_id                                             │
+                 * │    • exp / iat — expiration / issued-at timestamps                     │
+                 * │    • auth_time — when the user actually authenticated                  │
+                 * │    • nonce     — replay protection value (if provided by client)       │
+                 * │                                                                        │
+                 * │  SPRING CONSTANT: OidcScopes.OPENID = "openid"                        │
+                 * └────────────────────────────────────────────────────────────────────────┘
+                 *
+                 * ┌────────────────────────────────────────────────────────────────────────┐
+                 * │  2. profile                                                            │
+                 * ├────────────────────────────────────────────────────────────────────────┤
+                 * │                                                                        │
+                 * │  PURPOSE: Grants access to the user's basic profile information.       │
+                 * │           This is the "tell me about yourself" scope.                  │
+                 * │                                                                        │
+                 * │  CLAIMS UNLOCKED (returned in ID Token and/or /userinfo):              │
+                 * │    • name              — full display name ("Java Rush")               │
+                 * │    • given_name        — first name ("Java")                           │
+                 * │    • family_name       — last name ("Rush")                            │
+                 * │    • middle_name       — middle name                                   │
+                 * │    • nickname          — casual name or alias                          │
+                 * │    • preferred_username— the username the user prefers                 │
+                 * │    • profile           — URL to the user's profile page                │
+                 * │    • picture           — URL to the user's avatar/photo                │
+                 * │    • website           — URL to the user's personal website            │
+                 * │    • gender            — gender                                        │
+                 * │    • birthdate         — birthday (YYYY-MM-DD)                         │
+                 * │    • zoneinfo          — timezone (e.g., "Europe/Paris")               │
+                 * │    • locale            — locale (e.g., "en-US")                        │
+                 * │    • updated_at        — last time profile was updated (Unix ts)       │
+                 * │                                                                        │
+                 * │  SPRING CONSTANT: OidcScopes.PROFILE = "profile"                      │
+                 * └────────────────────────────────────────────────────────────────────────┘
+                 *
+                 * ┌────────────────────────────────────────────────────────────────────────┐
+                 * │  3. email                                                              │
+                 * ├────────────────────────────────────────────────────────────────────────┤
+                 * │                                                                        │
+                 * │  PURPOSE: Grants access to the user's email address and whether        │
+                 * │           it has been verified.                                         │
+                 * │                                                                        │
+                 * │  CLAIMS UNLOCKED:                                                      │
+                 * │    • email              — the user's email address                     │
+                 * │    • email_verified     — boolean, true if the email has been verified │
+                 * │                                                                        │
+                 * │  SPRING CONSTANT: OidcScopes.EMAIL = "email"                          │
+                 * │                                                                        │
+                 * │  NOTE: This scope is NOT currently registered for our client.          │
+                 * │        To add it:  .scope(OidcScopes.EMAIL)                           │
+                 * └────────────────────────────────────────────────────────────────────────┘
+                 *
+                 * ┌────────────────────────────────────────────────────────────────────────┐
+                 * │  4. address                                                            │
+                 * ├────────────────────────────────────────────────────────────────────────┤
+                 * │                                                                        │
+                 * │  PURPOSE: Grants access to the user's physical mailing address.        │
+                 * │                                                                        │
+                 * │  CLAIMS UNLOCKED:                                                      │
+                 * │    • address            — a JSON object containing:                    │
+                 * │        ├─ formatted       — full mailing address as a single string    │
+                 * │        ├─ street_address  — street, P.O. box, apartment, etc.          │
+                 * │        ├─ locality        — city or town                               │
+                 * │        ├─ region          — state, province, or region                 │
+                 * │        ├─ postal_code     — zip or postal code                         │
+                 * │        └─ country         — country name                               │
+                 * │                                                                        │
+                 * │  SPRING CONSTANT: OidcScopes.ADDRESS = "address"                      │
+                 * │                                                                        │
+                 * │  NOTE: Rarely used in modern apps. Most apps only need email +         │
+                 * │        profile. If your app ships physical goods, this is useful.      │
+                 * └────────────────────────────────────────────────────────────────────────┘
+                 *
+                 * ┌────────────────────────────────────────────────────────────────────────┐
+                 * │  5. phone                                                              │
+                 * ├────────────────────────────────────────────────────────────────────────┤
+                 * │                                                                        │
+                 * │  PURPOSE: Grants access to the user's phone number and verification   │
+                 * │           status.                                                       │
+                 * │                                                                        │
+                 * │  CLAIMS UNLOCKED:                                                      │
+                 * │    • phone_number          — the user's phone (e.g., "+1-555-555-5555")│
+                 * │    • phone_number_verified — boolean, true if verified via SMS/call    │
+                 * │                                                                        │
+                 * │  SPRING CONSTANT: OidcScopes.PHONE = "phone"                          │
+                 * │                                                                        │
+                 * │  NOTE: Useful for apps that need 2FA or SMS notifications.             │
+                 * └────────────────────────────────────────────────────────────────────────┘
+                 *
+                 * ── CUSTOM SCOPES ──
+                 *
+                 *   Beyond the 5 OIDC standard scopes, you can define your OWN scopes
+                 *   for fine-grained API access control. Custom scopes are plain strings
+                 *   — there's no special format required.
+                 *
+                 *   EXAMPLES:
+                 *     .scope("read")             // read-only access to resources
+                 *     .scope("write")            // write access to resources
+                 *     .scope("admin")            // administrative operations
+                 *     .scope("orders:read")      // read access to orders API
+                 *     .scope("orders:write")     // write access to orders API
+                 *     .scope("payments:charge")  // permission to charge payments
+                 *
+                 *   The Resource Server enforces these in its endpoint security:
+                 *
+                 *     @GetMapping("/api/orders")
+                 *     @PreAuthorize("hasAuthority('SCOPE_orders:read')")
+                 *     public List<Order> getOrders() { ... }
+                 *
+                 *   Note: Spring prefixes scope-based authorities with "SCOPE_"
+                 *   automatically when using oauth2ResourceServer() JWT config.
+                 *
+                 * ── SCOPE NEGOTIATION FLOW ──
+                 *
+                 *   1. Client REQUESTS scopes:
+                 *        /oauth2/authorize?scope=openid profile email
+                 *
+                 *   2. Server VALIDATES scopes:
+                 *        Are all requested scopes registered for this client?
+                 *        If the client requests "admin" but only has "openid profile"
+                 *        registered → the server rejects the request.
+                 *
+                 *   3. User CONSENTS to scopes (on the consent screen):
+                 *        The user sees:
+                 *          ☑ Access your profile information (profile)
+                 *          ☑ Access your email address (email)
+                 *          ☐ Access your phone number (phone)  ← user unchecks this
+                 *        Only consented scopes are included in the token.
+                 *
+                 *   4. Token CONTAINS the granted scopes:
+                 *        { "scope": "openid profile email" }
+                 *        (phone was denied by the user, so it's excluded)
+                 *
+                 * ── WHAT DOES A /userinfo RESPONSE LOOK LIKE? ──
+                 *
+                 *   When the client calls GET /userinfo with a valid access token
+                 *   that includes the openid + profile + email scopes, the response
+                 *   contains ALL claims associated with those scopes:
+                 *
+                 *     {
+                 *       "sub": "java-rush",
+                 *       "name": "Java Rush",
+                 *       "given_name": "Java",
+                 *       "family_name": "Rush",
+                 *       "preferred_username": "java-rush",
+                 *       "picture": "https://example.com/avatar.jpg",
+                 *       "locale": "en-US",
+                 *       "updated_at": 1717196400,
+                 *       "email": "java@rush.dev",
+                 *       "email_verified": true
+                 *     }
+                 *
+                 *   To populate these claims in Spring Authorization Server, you
+                 *   customize the OidcUserInfoMapper or add claims via a
+                 *   OAuth2TokenCustomizer<JwtEncodingContext> bean.
+                 *
+                 * ── SCOPES REGISTERED FOR THIS CLIENT ──
+                 *   Currently, this client has TWO scopes registered:
+                 *     • openid  → enables OIDC + ID Token issuance
+                 *     • profile → unlocks basic profile claims
                  */
-                .scope(OidcScopes.PROFILE)
-                .scope(OidcScopes.OPENID)
 
                 /*
                  * REDIRECT URI — Where the authorization server sends the user BACK
