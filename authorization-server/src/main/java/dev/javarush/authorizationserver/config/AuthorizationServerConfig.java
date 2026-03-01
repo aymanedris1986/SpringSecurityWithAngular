@@ -18,10 +18,11 @@ import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.core.OAuth2Token;
 import org.springframework.security.oauth2.core.oidc.OidcScopes;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
-import org.springframework.security.oauth2.server.authorization.InMemoryOAuth2AuthorizationConsentService;
-import org.springframework.security.oauth2.server.authorization.InMemoryOAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationConsentService;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationConsentService;
 import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.oauth2.server.authorization.client.InMemoryRegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
@@ -660,7 +661,8 @@ public class AuthorizationServerConfig {
                  *     • openid  → enables OIDC + ID Token issuance
                  *     • profile → unlocks basic profile claims
                  */
-
+                .scope(OidcScopes.OPENID)
+                .scope(OidcScopes.PROFILE)
                 /*
                  * REDIRECT URI — Where the authorization server sends the user BACK
                  * after they authenticate and consent.
@@ -740,30 +742,55 @@ public class AuthorizationServerConfig {
 
     /**
      * ─────────────────────────────────────────────────────────────────────────────────
-     * BEAN 5 — OAuth2 Authorization Service
+     * BEAN 5 — OAuth2 Authorization Service (JDBC)
      * ─────────────────────────────────────────────────────────────────────────────────
      *
-     * Stores OAuth2 authorizations (tokens, codes, etc.) in memory.
+     * Stores OAuth2 authorizations (tokens, codes, etc.) in PostgreSQL.
      * Defined explicitly because the filter chain depends on it at construction time.
      *
-     * IN PRODUCTION: Replace with JdbcOAuth2AuthorizationService backed by a database.
+     * BACKED BY: The 'oauth2_authorization' table in the 'public' schema.
+     *
+     * WHAT IT STORES:
+     *   • Authorization codes (during the auth-code flow, before exchange)
+     *   • Access tokens (JWT value, metadata, scopes, expiry)
+     *   • Refresh tokens (opaque value, metadata, expiry)
+     *   • OIDC ID tokens (JWT value, metadata, expiry)
+     *   • Device codes (if device authorization grant is used)
+     *
+     * WHY JDBC?
+     *   In-memory storage is lost on every restart — all issued tokens become
+     *   invalid. JDBC persistence means tokens survive server restarts and can
+     *   be shared across multiple instances of the authorization server.
      */
     @Bean
-    public OAuth2AuthorizationService authorizationService() {
-        return new InMemoryOAuth2AuthorizationService();
+    public OAuth2AuthorizationService authorizationService(
+            JdbcTemplate jdbcTemplate,
+            RegisteredClientRepository registeredClientRepository) {
+        return new JdbcOAuth2AuthorizationService(jdbcTemplate, registeredClientRepository);
     }
 
     /**
      * ─────────────────────────────────────────────────────────────────────────────────
-     * BEAN 6 — OAuth2 Authorization Consent Service
+     * BEAN 6 — OAuth2 Authorization Consent Service (JDBC)
      * ─────────────────────────────────────────────────────────────────────────────────
      *
-     * Stores user consent decisions (which scopes the user approved) in memory.
+     * Stores user consent decisions (which scopes the user approved) in PostgreSQL.
      *
-     * IN PRODUCTION: Replace with JdbcOAuth2AuthorizationConsentService.
+     * BACKED BY: The 'oauth2_authorization_consent' table in the 'public' schema.
+     *
+     * WHAT IT STORES:
+     *   • One row per (registered_client_id, principal_name) pair
+     *   • The 'authorities' column contains the granted scopes (e.g., "openid profile")
+     *
+     * WHY JDBC?
+     *   With in-memory storage, users must re-consent on every server restart.
+     *   JDBC persistence remembers consent across restarts — if a user already
+     *   approved "openid profile" for a client, they won't be prompted again.
      */
     @Bean
-    public OAuth2AuthorizationConsentService authorizationConsentService() {
-        return new InMemoryOAuth2AuthorizationConsentService();
+    public OAuth2AuthorizationConsentService authorizationConsentService(
+            JdbcTemplate jdbcTemplate,
+            RegisteredClientRepository registeredClientRepository) {
+        return new JdbcOAuth2AuthorizationConsentService(jdbcTemplate, registeredClientRepository);
     }
 }

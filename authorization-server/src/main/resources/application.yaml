@@ -1,2 +1,18 @@
 server:
   port: 8083
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ankabut
+    username: ankabut
+    password: ankabut
+    driver-class-name: org.postgresql.Driver
+
+  # Initialize the database with the Spring Authorization Server schema.
+  # On first run, this creates the oauth2_authorization and
+  # oauth2_authorization_consent tables in the 'public' schema.
+  # After the tables exist you can switch this to 'never'.
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
